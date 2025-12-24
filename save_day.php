@@ -15,6 +15,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 $data = json_decode(file_get_contents("php://input"));
 
+// 1. SECURITY CHECK
+requireAuth($data);
+
 // Basic Validation
 if (!isset($data->date) || !isset($data->movie_tmdb_id) || !isset($data->movie_title)) {
     http_response_code(400);
@@ -23,28 +26,19 @@ if (!isset($data->date) || !isset($data->movie_tmdb_id) || !isset($data->movie_t
 }
 
 try {
-    // --- VETO LOGIC START ---
-    $vetoedByToSave = null;
+    // ... (Keep your existing Veto and SQL logic exactly as it was) ...
+    // Note: Since we called requireAuth, we know $data->user_id is set.
     
-    // Check if the user requested a VETO
-    // We expect 'vetoed' to be true/false from frontend, and 'user_id' to be sent if logged in
+    $vetoedByToSave = null;
+
     if (isset($data->vetoed) && $data->vetoed === true) {
-        
-        if (!isset($data->user_id)) {
-            http_response_code(401);
-            echo json_encode(["message" => "You must be logged in to veto."]);
-            exit();
-        }
+        $userId = $data->user_id; // Safe to use now
 
-        $userId = $data->user_id;
-
-        // 1. Count existing vetoes for this user in this month
-        // We look at the month/year of the TARGET date they are trying to save
         $countSql = "SELECT COUNT(*) as count FROM calendar_days 
                      WHERE MONTH(date) = MONTH(:date) 
                      AND YEAR(date) = YEAR(:date) 
                      AND vetoed_by = :uid
-                     AND date != :currentDate"; // Don't count the current day if updating same day
+                     AND date != :currentDate";
         
         $countStmt = $pdo->prepare($countSql);
         $countStmt->execute([
@@ -55,25 +49,17 @@ try {
         $row = $countStmt->fetch();
         $usedVetoes = (int)$row['count'];
 
-        // 2. Enforce Limit
         if ($usedVetoes >= 3) {
-            http_response_code(403); // Forbidden
-            echo json_encode([
-                "message" => "Veto limit reached! You have used {$usedVetoes} of 3 vetoes this month."
-            ]);
+            http_response_code(403); 
+            echo json_encode(["message" => "Veto limit reached!"]);
             exit();
         }
-
-        // If safe, set the ID to save
         $vetoedByToSave = $userId;
     }
-    // --- VETO LOGIC END ---
 
-
-    // SQL Query: Updated to use vetoed_by instead of vetoed
     $sql = "INSERT INTO calendar_days 
-            (date, movie_tmdb_id, movie_title, movie_poster_url, movie_runtime, picked_by, dinner_title, dinner_show_title, vetoed_by)
-            VALUES (:date, :tmdb_id, :title, :poster, :runtime, :picked_by, :dinner, :dinner_show, :vetoed_by)
+            (date, movie_tmdb_id, movie_title, movie_poster_url, movie_runtime, picked_by, dinner_title, vetoed_by)
+            VALUES (:date, :tmdb_id, :title, :poster, :runtime, :picked_by, :dinner, :vetoed_by)
             ON DUPLICATE KEY UPDATE
             movie_tmdb_id = VALUES(movie_tmdb_id),
             movie_title = VALUES(movie_title),
@@ -81,7 +67,6 @@ try {
             movie_runtime = VALUES(movie_runtime),
             picked_by = VALUES(picked_by),
             dinner_title = VALUES(dinner_title),
-            dinner_show_title = VALUES(dinner_show_title),
             vetoed_by = VALUES(vetoed_by)";
 
     $stmt = $pdo->prepare($sql);
@@ -94,8 +79,7 @@ try {
         ':runtime' => $data->movie_runtime ?? 0,
         ':picked_by' => $data->picked_by ?? 'Family',
         ':dinner' => $data->dinner_title ?? null,
-        ':dinner_show' => $data->dinner_show_title ?? null,
-        ':vetoed_by' => $vetoedByToSave // Will be User ID or NULL
+        ':vetoed_by' => $vetoedByToSave 
     ]);
 
     echo json_encode([

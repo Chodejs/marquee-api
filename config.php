@@ -19,7 +19,16 @@ try {
     $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
     
 } catch (PDOException $e) {
-    // In production, log this, don't echo it. But for us...
     die("Emma says: Database connection failed. " . $e->getMessage());
+}
+
+// --- SECURITY HELPER ---
+function requireAuth($data) {
+    // If no user_id is provided, kick them out.
+    if (!isset($data->user_id) || empty($data->user_id)) {
+        http_response_code(401); // Unauthorized
+        echo json_encode(["message" => "Emma says: You must be logged in to make changes."]);
+        exit();
+    }
 }
 ?>
