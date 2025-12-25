@@ -26,66 +26,92 @@ if (!isset($data->date) || !isset($data->movie_tmdb_id) || !isset($data->movie_t
 }
 
 try {
-    // ... (Keep your existing Veto and SQL logic exactly as it was) ...
-    // Note: Since we called requireAuth, we know $data->user_id is set.
-    
-    $vetoedByToSave = null;
+    // --- NEW: Determine Duration ---
+    // If frontend sends duration_days, use it. Otherwise 1.
+    // We cap it at 60 just to prevent infinite loops if something goes wrong.
+    $duration = isset($data->duration_days) ? (int)$data->duration_days : 1;
+    if ($duration < 1) $duration = 1;
+    if ($duration > 60) $duration = 60;
 
-    if (isset($data->vetoed) && $data->vetoed === true) {
-        $userId = $data->user_id; // Safe to use now
+    $baseDate = new DateTime($data->date);
+    $savedCount = 0;
 
-        $countSql = "SELECT COUNT(*) as count FROM calendar_days 
-                     WHERE MONTH(date) = MONTH(:date) 
-                     AND YEAR(date) = YEAR(:date) 
-                     AND vetoed_by = :uid
-                     AND date != :currentDate";
+    // --- NEW: Loop through the duration ---
+    for ($i = 0; $i < $duration; $i++) {
         
-        $countStmt = $pdo->prepare($countSql);
-        $countStmt->execute([
-            ':date' => $data->date, 
-            ':uid' => $userId,
-            ':currentDate' => $data->date
-        ]);
-        $row = $countStmt->fetch();
-        $usedVetoes = (int)$row['count'];
+        // Calculate the date for this iteration
+        // Clone the base date so we don't mutate the original on every loop
+        $currentDateObj = clone $baseDate;
+        $currentDateObj->modify("+$i day");
+        $loopDateStr = $currentDateObj->format('Y-m-d');
 
-        if ($usedVetoes >= 3) {
-            http_response_code(403); 
-            echo json_encode(["message" => "Veto limit reached!"]);
-            exit();
+        // --- VETO LOGIC (Inside loop now) ---
+        $vetoedByToSave = null;
+        if (isset($data->vetoed) && $data->vetoed === true) {
+            $userId = $data->user_id; 
+
+            // Check how many vetoes this user has used in the target month
+            $countSql = "SELECT COUNT(*) as count FROM calendar_days 
+                         WHERE MONTH(date) = MONTH(:date) 
+                         AND YEAR(date) = YEAR(:date) 
+                         AND vetoed_by = :uid
+                         AND date != :currentDate";
+            
+            $countStmt = $pdo->prepare($countSql);
+            $countStmt->execute([
+                ':date' => $loopDateStr, 
+                ':uid' => $userId,
+                ':currentDate' => $loopDateStr
+            ]);
+            $row = $countStmt->fetch();
+            $usedVetoes = (int)$row['count'];
+
+            if ($usedVetoes >= 3) {
+                // If they hit the limit mid-loop, we stop and warn them.
+                // Previous days in the loop are already saved (which is fine).
+                http_response_code(403); 
+                echo json_encode([
+                    "message" => "Veto limit reached on $loopDateStr! Saved $savedCount days."
+                ]);
+                exit();
+            }
+            $vetoedByToSave = $userId;
         }
-        $vetoedByToSave = $userId;
+
+        // --- SAVE LOGIC ---
+        $sql = "INSERT INTO calendar_days 
+                (date, movie_tmdb_id, movie_title, movie_poster_url, movie_runtime, picked_by, dinner_title, vetoed_by)
+                VALUES (:date, :tmdb_id, :title, :poster, :runtime, :picked_by, :dinner, :vetoed_by)
+                ON DUPLICATE KEY UPDATE
+                movie_tmdb_id = VALUES(movie_tmdb_id),
+                movie_title = VALUES(movie_title),
+                movie_poster_url = VALUES(movie_poster_url),
+                movie_runtime = VALUES(movie_runtime),
+                picked_by = VALUES(picked_by),
+                dinner_title = VALUES(dinner_title),
+                vetoed_by = VALUES(vetoed_by)";
+
+        $stmt = $pdo->prepare($sql);
+        
+        $stmt->execute([
+            ':date' => $loopDateStr,
+            ':tmdb_id' => $data->movie_tmdb_id,
+            ':title' => $data->movie_title,
+            ':poster' => $data->movie_poster_url ?? '',
+            ':runtime' => $data->movie_runtime ?? 0,
+            ':picked_by' => $data->picked_by ?? 'Family',
+            // Only save dinner on the first day ($i === 0), otherwise NULL
+            ':dinner' => ($i === 0) ? ($data->dinner_title ?? null) : null,
+            ':vetoed_by' => $vetoedByToSave 
+        ]);
+
+        $savedCount++;
     }
 
-    $sql = "INSERT INTO calendar_days 
-            (date, movie_tmdb_id, movie_title, movie_poster_url, movie_runtime, picked_by, dinner_title, vetoed_by)
-            VALUES (:date, :tmdb_id, :title, :poster, :runtime, :picked_by, :dinner, :vetoed_by)
-            ON DUPLICATE KEY UPDATE
-            movie_tmdb_id = VALUES(movie_tmdb_id),
-            movie_title = VALUES(movie_title),
-            movie_poster_url = VALUES(movie_poster_url),
-            movie_runtime = VALUES(movie_runtime),
-            picked_by = VALUES(picked_by),
-            dinner_title = VALUES(dinner_title),
-            vetoed_by = VALUES(vetoed_by)";
-
-    $stmt = $pdo->prepare($sql);
-    
-    $stmt->execute([
-        ':date' => $data->date,
-        ':tmdb_id' => $data->movie_tmdb_id,
-        ':title' => $data->movie_title,
-        ':poster' => $data->movie_poster_url ?? '',
-        ':runtime' => $data->movie_runtime ?? 0,
-        ':picked_by' => $data->picked_by ?? 'Family',
-        ':dinner' => $data->dinner_title ?? null,
-        ':vetoed_by' => $vetoedByToSave 
-    ]);
-
     echo json_encode([
-        "message" => "Day updated successfully.", 
-        "id" => $pdo->lastInsertId(),
-        "vetoes_used" => isset($usedVetoes) ? $usedVetoes + 1 : null
+        "message" => "Success! Covered $savedCount days with this show.", 
+        "id" => $pdo->lastInsertId(), // ID of the last one inserted
+        "days_saved" => $savedCount
     ]);
 
 } catch (PDOException $e) {
