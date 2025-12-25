@@ -8,7 +8,6 @@ define('DB_USER', 'root');
 define('DB_PASS', 'mysql');
 
 
-
 try {
     $dsn = "mysql:host=" . DB_HOST . ";dbname=" . DB_NAME . ";charset=utf8mb4";
     $pdo = new PDO($dsn, DB_USER, DB_PASS);
